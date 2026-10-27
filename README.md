@@ -11,7 +11,7 @@
 [![Docker](https://img.shields.io/badge/Docker-local%20A%2FB%20lab-2496ed?logo=docker&logoColor=white)](#lab-architecture)
 [![Scope](https://img.shields.io/badge/Scope-loopback%20only-455a64)](#safety-boundaries)
 
-[Start the lab](#start-the-lab) · [Patch guide](./How-To-Patch/) · [How it works](#how-it-works) · [Results](#verified-results) · [Evidence](#test-evidence) · [Troubleshooting](#troubleshooting)
+[Start the lab](#start-the-lab) · [Patch guide](./how-to-patch/) · [How it works](#how-it-works) · [Results](#verified-results) · [Evidence](#test-evidence) · [Troubleshooting](#troubleshooting)
 
 </div>
 
@@ -298,7 +298,7 @@ node2shell/
 │   └── node2shell-hero.png      # Previous color variant
 ├── docs/
 │   └── analysis.md         # Technical analysis
-├── How-To-Patch/
+├── how-to-patch/
 │   └── README.md           # Production remediation and verification guide
 ├── evidence/               # Captured verification output
 ├── Dockerfile              # Vulnerable/patched image via NODE_IMAGE
