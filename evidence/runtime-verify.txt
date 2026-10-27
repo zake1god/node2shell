@@ -1,0 +1,4 @@
+node2shell-fixed|node2shell:fixed|Up 3 minutes|127.0.0.1:3002->3000/tcp
+node2shell-vuln|node2shell:vuln|Up 3 minutes|127.0.0.1:3000->3000/tcp
+{"service":"orbital","node":"v24.22.0"}
+{"service":"orbital","node":"v24.22.1"}

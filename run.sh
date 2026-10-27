@@ -13,8 +13,9 @@ docker build --platform linux/amd64 --build-arg NODE_IMAGE="$FIXED_IMAGE" -t nod
 
 docker rm -f node2shell-vuln node2shell-fixed 2>/dev/null || true
 docker run -d --name node2shell-vuln  --restart on-failure \
-  -e PORT=3000 -e UV_THREADPOOL_SIZE=1 -p 127.0.0.1:3000:3000 node2shell:vuln
+  -e PORT=3000 -e UV_THREADPOOL_SIZE=1 -e LAB_VARIANT=vulnerable \
+  -p 127.0.0.1:3000:3000 node2shell:vuln
 docker run -d --name node2shell-fixed --restart on-failure \
-  -e PORT=3000 -p 127.0.0.1:3002:3000 node2shell:fixed
+  -e PORT=3000 -e LAB_VARIANT=fixed -p 127.0.0.1:3002:3000 node2shell:fixed
 
 echo "vuln :3000   fixed :3002"

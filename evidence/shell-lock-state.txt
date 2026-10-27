@@ -1,0 +1,3 @@
+vulnerable shell before RCE: HTTP 403
+patched shell: HTTP 403
+vulnerable shell after session close: HTTP 403

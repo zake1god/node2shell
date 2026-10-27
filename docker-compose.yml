@@ -12,6 +12,7 @@ services:
     environment:
       PORT: "3000"
       UV_THREADPOOL_SIZE: "1"
+      LAB_VARIANT: "vulnerable"
     ports:
       - "127.0.0.1:3000:3000"
     restart: on-failure
@@ -24,6 +25,7 @@ services:
     platform: linux/amd64
     environment:
       PORT: "3000"
+      LAB_VARIANT: "fixed"
     ports:
       - "127.0.0.1:3002:3000"
     restart: on-failure

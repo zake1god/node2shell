@@ -49,6 +49,22 @@ with a fresh layout; the exploit retries. The socket reports hit or miss on its
 own: command output comes back on the exploit socket on a hit, and an HTTP error
 or a dropped connection on a miss, so no target access is needed.
 
+## Target-backed command console
+
+The base proof uses the ROP chain to call `execvp("/usr/bin/id")` and returns
+stdout over the exploited request socket. Shell mode changes only that final
+filename to `/activate`, a short ELF helper compiled from
+`app/activate-shell.c`. The helper writes a random token inside the container
+and returns the same token over the already-duplicated exploit socket.
+
+After the supervisor restarts Node, the token unlocks `/api/v1/shell`. This is
+an explicit post-exploitation lab harness: it does not participate in reaching
+the Brotli bug or obtaining instruction-pointer control. Direct requests are
+HTTP 403 before RCE, the patched variant disables the console regardless of
+token state, and the client revokes the token when the session ends. The
+console remains loopback-only and commands run as `uid=1000(node)` with a
+10-second timeout.
+
 The center is a property of the build, not a per-target secret. You calibrate it
 once against your own local copy of the build and reuse it against any instance of
 that build. Three fresh lives landed at attempts 2, 4, and 13; a deliberately
@@ -89,11 +105,14 @@ Gadget authenticity was checked directly too: all 9 binary-derived fields in
 
 ## Fidelity
 
-The lab reaches the vulnerability through stock Express 5 / body-parser 2.x, with
-no `eval`, no `execSync`, no application sink, and no in-process patching of the
-decoder. The CVE id, fixed versions, root cause (an invalid block switch reported
-as "need more input"), attack surface, and probabilistic behavior all match the
-Node advisory and Imperva's write-up. One deviation is deliberate: Imperva demoed
-arm64, while this lab is an x86-64 port with its own gadget chain, since Imperva
-published no PoC. The target is not weakened. It runs as non-root
-`uid=1000(node)` under full ASLR on a non-PIE binary; `labcheck.sh` shows this.
+The lab reaches the vulnerability through stock Express 5 / body-parser 2.x,
+with no application sink involved in the exploit path and no in-process
+patching of the decoder. The separately documented command console is unlocked
+only after the ROP chain has already executed `/activate`; it exists to make
+post-exploitation validation interactive. The CVE id, fixed versions, root
+cause (an invalid block switch reported as "need more input"), attack surface,
+and probabilistic behavior all match the Node advisory and Imperva's write-up.
+One deviation is deliberate: Imperva demoed arm64, while this lab is an x86-64
+port with its own gadget chain, since Imperva published no PoC. The target is
+not weakened. It runs as non-root `uid=1000(node)` under full ASLR on a non-PIE
+binary; `labcheck.sh` shows this.

@@ -1,0 +1,10 @@
+=== containers ===
+node2shell-fixed|node2shell:fixed|Up 10 seconds|127.0.0.1:3002->3000/tcp
+node2shell-vuln|node2shell:vuln|Up 11 seconds|127.0.0.1:3000->3000/tcp
+=== vulnerable endpoint ===
+{"service":"orbital","node":"v24.22.0"}
+=== patched endpoint ===
+{"service":"orbital","node":"v24.22.1"}
+=== node versions ===
+v24.22.0
+v24.22.1

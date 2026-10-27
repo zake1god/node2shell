@@ -1,0 +1,16 @@
+==================================================================
+ node2shell target check: node2shell-vuln
+==================================================================
+  node version : v24.22.0
+  runs as      : uid=1000(node) gid=1000(node) groups=1000(node)
+  binary type  : ET_EXEC (non-PIE)
+  ASLR         : randomize_va_space=2  ->  FULL ASLR (enabled, kernel default)
+
+  live proof  (libc base must differ across worker lives):
+    worker life A : 0x7f1da80bf000
+    worker life B : 0x7071f542e000
+    => the base moved: ASLR is live, not disabled.
+
+  verdict: standard user, non-PIE binary, FULL ASLR enabled.
+           poc.py defeats real ASLR probabilistically. Nothing is weakened.
+==================================================================
